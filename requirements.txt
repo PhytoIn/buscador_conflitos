@@ -1,0 +1,6 @@
+streamlit
+lxml
+unidecode
+fuzzywuzzy
+python-Levenshtein
+requests
