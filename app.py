@@ -88,7 +88,7 @@ def get_authors_from_doi(doi):
 def main():
     st.title("Buscador de Conflitos")
     st.write("Versão 2.0 - 28/04/2025")
-    st.write("Autor: Rodrigo A. S. Pereira - raspereira@usp.br")
+    st.write("Autor: Rodrigo A. S. Pereira (Faculdade de Filosofia, Ciências e Letras de Ribeirão Preto, USP), e-mail: raspereira@usp.br")
     st.write("Este programa realiza a comparação entre uma lista de nomes (por exemplo, candidatos a um concurso) e os nomes extraídos de colaborações acadêmicas.")
     
     # Entrada de nomes separados por vírgula
@@ -115,8 +115,9 @@ def main():
             5. Faça upload deste arquivo nesta aplicação
             """)
             
-            # URL da imagem no GitHub
+            # URL da imagem no GitHub - corrigido
             imagem_url = "https://raw.githubusercontent.com/PhytoIn/buscador_conflitos/refs/heads/main/xml_lattes.png"
+            st.image(imagem_url, caption="Como baixar o XML do Lattes")
         
         # Upload do arquivo XML
         uploaded_file = st.file_uploader("Faça upload do arquivo XML do Lattes", type=["xml"])
@@ -142,11 +143,8 @@ def main():
                     st.warning("Nenhum nome encontrado no arquivo XML.")
                     return
                     
-                st.write(f"Nomes encontrados no currículo Lattes ({len(lattes_names)}):")
-                for name in lattes_names[:10]:  # Mostrar apenas os 10 primeiros nomes para não sobrecarregar a interface
-                    st.write(f"- {name}")
-                if len(lattes_names) > 10:
-                    st.write(f"... e mais {len(lattes_names) - 10} nomes.")
+                # Apenas indicar o número de nomes encontrados, sem listá-los
+                st.info(f"Foram encontrados {len(lattes_names)} nomes no currículo Lattes.")
                 
                 # Busca de correspondências
                 matched_results = fuzzy_name_match(input_names, lattes_names, threshold)
@@ -181,9 +179,8 @@ def main():
                     return
                     
                 st.success(f"Artigo encontrado: {article_title}")
-                st.write(f"Autores do artigo ({len(author_names)}):")
-                for author in author_names:
-                    st.write(f"- {author}")
+                # Apenas indicar o número de autores, sem listá-los
+                st.info(f"Foram encontrados {len(author_names)} autores na publicação.")
                 
                 # Busca de correspondências
                 matched_results = fuzzy_name_match(input_names, author_names, threshold)
