@@ -116,7 +116,7 @@ def main():
             """)
             
             # URL da imagem no GitHub
-            imagem_url = "https://raw.githubusercontent.com/PhytoIn/buscador_conflitos/refs/heads/main/xml_lattes.png")
+            imagem_url = "https://raw.githubusercontent.com/PhytoIn/buscador_conflitos/refs/heads/main/xml_lattes.png"
         
         # Upload do arquivo XML
         uploaded_file = st.file_uploader("Faça upload do arquivo XML do Lattes", type=["xml"])
