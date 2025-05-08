@@ -1,225 +1,360 @@
 import streamlit as st
-from lxml import etree
-import unidecode
-from fuzzywuzzy import fuzz
+import fitz  # PyMuPDF
+import re
+import unicodedata
+import itertools
+from difflib import SequenceMatcher
 import requests
-import io
 
-# Função auxiliar para remover acentos de uma string
-def remove_accents(string):
-    return unidecode.unidecode(string)
+def marcar_inicio_nome(text):
+    """Marca o início dos nomes com '@nome' após numeração (ex: '1. ')"""
+    return re.sub(r'\b\d+\.\s*', '@nome', text)
 
-# Função auxiliar para gerar possíveis abreviações e variações de um nome
-def generate_abbreviations(name):
-    name_parts = name.split()
-    abbreviations = {'completo': name}
-    
-    # Adicionando diferentes variações de nome
-    if len(name_parts) > 1:
-        abbreviations['sobrenome_nome_completo'] = "{}, {}".format(name_parts[-1], ' '.join(name_parts[:-1]))
-        abbreviations['sobrenome_inicial_nome'] = "{}, {}.".format(name_parts[-1], name_parts[0][0])
-        if len(name_parts) > 2:
-            initials = '. '.join([p[0] for p in name_parts[:-1]]) + '.'
-            abbreviations['sobrenome_iniciais'] = "{}, {}".format(name_parts[-1], initials)
-            abbreviations['invertido'] = ' '.join(reversed(name_parts))
-            abbreviated_name = [name_parts[0]] + ["{}.".format(p[0]) for p in name_parts[1:-1]] + [name_parts[-1]]
-            abbreviations['abreviado'] = ' '.join(abbreviated_name)
-    
-    return abbreviations
+def marcar_fim_nome_apos_inicio(text):
+    """Marca o fim dos nomes após padrões como '. Palavra' ou '. 2020'"""
+    end_pattern = re.compile(r'\.\s([A-ZÀ-Ú][a-zA-ZÀ-ú]{2,}|\d{4})')
+    start_idx = 0
+    result = []
 
-# Função para realizar a correspondência fuzzy de nomes
-def fuzzy_name_match(input_names, author_names, threshold):
-    matched_results = []
+    while True:
+        start_match = re.search(r'@nome', text[start_idx:])
+        if not start_match:
+            break
+
+        start_pos = start_idx + start_match.start()
+        match = end_pattern.search(text[start_pos:])
+        if not match:
+            break
+
+        pattern_start_global = start_pos + match.start()
+        pattern_end_global = start_pos + match.end()
+
+        result.append(text[start_idx:start_pos])
+        result.append(text[start_pos:pattern_start_global])
+        result.append('@fim_nome')
+        result.append(text[pattern_start_global:pattern_end_global])
+        start_idx = pattern_end_global
+
+    result.append(text[start_idx:])
+    return ''.join(result)
+
+def formatar_quebras_paragrafo(text):
+    """Substitui marcadores por quebras de parágrafo"""
+    substituicoes = [
+        (r'@nome', '\n'),                   
+        (r'@fim_nome', '\n'),              
+        (r'Integrantes:', '\nIntegrantes:\n'),
+        (r'\bIntegrante\b', '\n• '),       
+        (r'\bCoordenador\b', '\nCoordenador:\n'),
+        (r'\s/\s', '\n'),                  
+        (r';', '\n'),                      
+        (r'In:', '\nPublicado em:\n'),     
+        (r'\.\s*\(Org\.\)', '\n(Organizador)\n'),
+        (r'\(Org\.\)', '\n(Organizador)\n')
+    ]
     
-    for input_name in input_names:
-        matches_for_this_name = []
-        input_name_no_accents = remove_accents(input_name)
-        input_name_variations = generate_abbreviations(input_name_no_accents)
+    for padrao, substituicao in substituicoes:
+        text = re.sub(padrao, substituicao, text)
+    
+    text = re.sub(r' +', ' ', text)         
+    text = re.sub(r'\n ', '\n', text)       
+    text = re.sub(r'\n{3,}', '\n\n', text)  
+    
+    return text.strip()
+
+def limpar_texto(text):
+    """Aplica todas as regras de limpeza especificadas"""
+    linhas_limpas = []
+    
+    for linha in text.split('\n'):
+        original = linha
+        linha = linha.strip()
         
-        for author_name in author_names:
-            author_name_no_accents = remove_accents(author_name)
+        if len(original) >= 60:
+            continue
             
-            for variation_type, variation in input_name_variations.items():
-                ratio = fuzz.token_sort_ratio(variation, author_name_no_accents)
-                
-                if ratio >= threshold:
-                    matches_for_this_name.append({
-                        "nome_inserido": input_name,
-                        "nome_encontrado": author_name,
-                        "similaridade": ratio,
-                        "variacao_usada": variation_type
-                    })
-                    break
-        
-        if matches_for_this_name:
-            # Ordenar por similaridade, do maior para o menor
-            matches_for_this_name.sort(key=lambda x: x["similaridade"], reverse=True)
-            matched_results.extend(matches_for_this_name)
+        if re.search(r'\d', linha):
+            continue
+            
+        if re.search(r'[:?!]', linha):
+            continue
+            
+        if re.search(r'[\(\)\{\}\[\]]', linha):
+            continue
+            
+        if len(linha.split()) == 1:
+            continue
+            
+        linha = re.sub(r'[-\s]+$', '', linha)
+            
+        linhas_limpas.append(linha)
     
-    return matched_results
+    return '\n'.join(linhas_limpas)
 
-# Função para extrair nomes do XML do CV Lattes
-def extract_names_from_lattes_xml(xml_file):
-    try:
-        tree = etree.parse(xml_file)
-        integrantes = tree.xpath(".//INTEGRANTES-DO-PROJETO/@NOME-COMPLETO")
-        autores = tree.xpath(".//AUTORES/@NOME-COMPLETO-DO-AUTOR")
-        orientados = tree.xpath(".//NOME-DO-ORIENTADO/text()")
-        combined_names = list(set(integrantes + autores + orientados))
-        return combined_names
-    except Exception as e:
-        st.error(f"Erro ao analisar o XML: {e}")
-        return []
+def normalizar_nomes(text):
+    """Padroniza nomes removendo acentos e caracteres especiais"""
+    linhas_normalizadas = []
+    
+    for linha in text.split('\n'):
+        linha = unicodedata.normalize('NFKD', linha)
+        linha = linha.encode('ASCII', 'ignore').decode('ASCII')
+        linha = re.sub(r"[,.'\-]", ' ', linha)
+        linha = re.sub(r'\s+', ' ', linha).strip().upper()
+        linhas_normalizadas.append(linha)
+    
+    return '\n'.join(linhas_normalizadas)
 
-# Função para obter autores de um DOI
+def remover_particulas(text):
+    """Remove partículas de ligação de nomes com mais de 2 palavras"""
+    particulas = {"DA", "DE", "DO", "DAS", "DOS", "VAN", "JR", "JUNIOR"}
+    linhas_limpas = []
+    
+    for linha in text.split('\n'):
+        palavras = linha.split()
+        if len(palavras) > 2:
+            palavras = [p for p in palavras if p not in particulas]
+        linhas_limpas.append(' '.join(palavras))
+    
+    return '\n'.join(linhas_limpas)
+
+def processar_nome(nome):
+    """Processa um nome para comparação"""
+    nome = unicodedata.normalize('NFKD', nome)
+    nome = nome.encode('ASCII', 'ignore').decode('ASCII').upper()
+    nome = re.sub(r"[,.'\-]", ' ', nome)
+    nome = re.sub(r'\s+', ' ', nome).strip()
+    
+    partes = nome.split()
+    particulas = {"DA", "DE", "DO", "DAS", "DOS", "VAN", "JR", "JUNIOR"}
+    if len(partes) > 2:
+        partes = [p for p in partes if p not in particulas]
+    return ' '.join(partes)
+
+def gerar_combinacoes_nomes(partes):
+    """Gera variações possíveis para os nomes"""
+    combinacoes = []
+    n = len(partes)
+    
+    # Combinações não abreviadas
+    if n >= 2:
+        combinacoes.append(' '.join(partes))
+        combinacoes.append(f"{partes[-1]} {' '.join(partes[:-1])}")
+        
+        if n >= 3:
+            combinacoes.append(f"{' '.join(partes[-2:])} {' '.join(partes[:-2])}")
+
+    # Abreviações progressivas
+    if n >= 3:
+        if n == 3:
+            combinacoes.append(f"{partes[0]} {partes[1][0]} {partes[2]}")
+        else:
+            for qtd in range(1, n-1):
+                for inicio in range(1, (n-1) - qtd + 1):
+                    temp = partes.copy()
+                    for i in range(inicio, inicio + qtd):
+                        temp[i] = temp[i][0]
+                    combinacoes.append(' '.join(temp))
+
+    # Último nome primeiro com abreviações
+    if n >= 2:
+        ultimo = [partes[-1]]
+        demais = partes[:-1]
+        
+        for qtd in range(1, len(demais)+1):
+            for inicio in range(len(demais) - qtd + 1):
+                temp = []
+                for i, p in enumerate(demais):
+                    if inicio <= i < inicio + qtd:
+                        temp.append(p[0])
+                    else:
+                        temp.append(p)
+                combinacoes.append(f"{' '.join(ultimo)} {' '.join(temp)}")
+
+    # Dois últimos primeiro com abreviações
+    if n >= 3:
+        dois_ultimos = partes[-2:]
+        demais = partes[:-2]
+        
+        if demais:
+            if n == 3:
+                combinacoes.append(f"{' '.join(dois_ultimos)} {demais[0][0]}")
+                combinacoes.append(f"{' '.join(dois_ultimos)} {demais[0]}")
+            else:
+                for qtd in range(1, len(demais)+1):
+                    for inicio in range(len(demais) - qtd + 1):
+                        temp = []
+                        for i, p in enumerate(demais):
+                            if inicio <= i < inicio + qtd:
+                                temp.append(p[0])
+                            else:
+                                temp.append(p)
+                        combinacoes.append(f"{' '.join(dois_ultimos)} {' '.join(temp)}")
+
+    return list(set(combinacoes))
+
+# Função modificada para compatibilidade
 def get_authors_from_doi(doi):
     url = f"https://api.crossref.org/works/{doi}"
-    response = requests.get(url)
-    if response.ok:
-        data = response.json()
-        author_data = data['message'].get('author', [])
-        article_title = data['message'].get('title', [''])[0]
-        author_names = ["{} {}".format(author.get('given', ''), author.get('family', '')).strip() for author in author_data]
-        return author_names, article_title
-    else:
+    try:
+        response = requests.get(url, timeout=10)
+        if response.ok:
+            data = response.json()
+            author_data = data['message'].get('author', [])
+            author_names = ["{} {}".format(author.get('given', ''), author.get('family', '')).strip() 
+                          for author in author_data]
+            return author_names, None
+        return None, None
+    except Exception as e:
         return None, None
 
-# Interface principal do aplicativo
-def main():
-    st.title("Buscador de Conflitos")
-    st.write("Versão 2.0 - 28/04/2025")
-    st.write("Autor: Rodrigo A. S. Pereira (Faculdade de Filosofia, Ciências e Letras de Ribeirão Preto, USP), e-mail: raspereira@usp.br")
-    st.write("Este programa realiza a comparação entre uma lista de nomes (por exemplo, candidatos a um concurso) e os nomes extraídos de colaborações acadêmicas.")
-    
-    # Entrada de nomes separados por vírgula
-    input_names_str = st.text_area("Digite os nomes (separados por vírgula):")
-    
-    # Seleção do método de comparação
-    metodo = st.radio(
-        "Escolha o método de comparação:",
-        ["Comparar a um currículo Lattes", "Comparar a uma publicação"]
-    )
-    
-    # Limiar comum a ambos os métodos
-    threshold = st.slider("Limite de similaridade (%)", min_value=50, max_value=100, value=90, step=1)
-    st.write("Limiares mais elevados tornam a busca mais precisa. Similaridades abaixo de 80% aumentam o risco de falsos positivos.")
-    
-    # Expander para o método do Lattes
-    if metodo == "Comparar a um currículo Lattes":
-        with st.expander("Como baixar o arquivo XML do Lattes"):
-            st.markdown("""
-            1. Acesse o currículo Lattes da pessoa no site do CNPq
-            2. No canto superior direito da página, procure o ícone XML (destacado em amarelo na imagem)
-            3. Clique no ícone para baixar o arquivo XML
-            4. Salve o arquivo em seu computador
-            5. Faça upload deste arquivo nesta aplicação
-            """)
-            
-            # URL da imagem no GitHub - corrigido
-            imagem_url = "https://raw.githubusercontent.com/PhytoIn/buscador_conflitos/refs/heads/main/xml_lattes.png"
-            st.image(imagem_url, caption="Como baixar o XML do Lattes")
-        
-        # Upload do arquivo XML
-        uploaded_file = st.file_uploader("Faça upload do arquivo XML do Lattes", type=["xml"])
-        
-        if st.button("Comparar Nomes"):
-            if not input_names_str:
-                st.warning("Por favor, digite os nomes para comparação.")
-                return
-                
-            if not uploaded_file:
-                st.warning("Por favor, faça upload de um arquivo XML do Lattes.")
-                return
-                
-            try:
-                input_names = [name.strip() for name in input_names_str.split(',')]
-                
-                # Processando o arquivo carregado
-                xml_bytes = io.BytesIO(uploaded_file.getvalue())
-                
-                # Extração de nomes do XML
-                lattes_names = extract_names_from_lattes_xml(xml_file=xml_bytes)
-                if not lattes_names:
-                    st.warning("Nenhum nome encontrado no arquivo XML.")
-                    return
-                    
-                # Apenas indicar o número de nomes encontrados, sem listá-los
-                st.info(f"Foram encontrados {len(lattes_names)} nomes no currículo Lattes.")
-                
-                # Busca de correspondências
-                matched_results = fuzzy_name_match(input_names, lattes_names, threshold)
-                
-                mostrar_resultados(matched_results, input_names)
-                
-            except Exception as e:
-                st.error(f"Ocorreu um erro: {e}")
-    
-    # Expander para o método do DOI
-    else:  # "Comparar a uma publicação"
-        # Entrada do DOI
-        doi = st.text_input("Digite o DOI da publicação:")
-        
-        if st.button("Comparar Nomes"):
-            if not input_names_str:
-                st.warning("Por favor, digite os nomes para comparação.")
-                return
-                
-            if not doi:
-                st.warning("Por favor, digite o DOI da publicação.")
-                return
-                
-            try:
-                input_names = [name.strip() for name in input_names_str.split(',')]
-                
-                # Busca de autores através do DOI
-                author_names, article_title = get_authors_from_doi(doi)
-                
-                if author_names is None:
-                    st.error("Não foi possível recuperar os nomes dos autores a partir do DOI.")
-                    return
-                    
-                st.success(f"Artigo encontrado: {article_title}")
-                # Apenas indicar o número de autores, sem listá-los
-                st.info(f"Foram encontrados {len(author_names)} autores na publicação.")
-                
-                # Busca de correspondências
-                matched_results = fuzzy_name_match(input_names, author_names, threshold)
-                
-                mostrar_resultados(matched_results, input_names)
-                
-            except Exception as e:
-                st.error(f"Ocorreu um erro: {e}")
+# Interface Streamlit
+st.set_page_config(page_title="Buscador de Conflitos de Interesse", layout="centered")
+st.title("Buscador de Conflitos de Interesse")
+st.write("Versão 2.0 - 08/05/2025")
+st.write("Autor: Rodrigo A. S. Pereira (Faculdade de Filosofia, Ciências e Letras de Ribeirão Preto, USP) <br>e-mail: raspereira@usp.br",
+         unsafe_allow_html=True)
+st.write("Este programa realiza a comparação entre uma lista de nomes (por exemplo, candidatos a um concurso) e nomes extraídos de colaborações acadêmicas. <br>Confira sempre o resultado. Este aplicativo pode cometer erros ou detectar homônimos.",
+         unsafe_allow_html=True)
 
-# Função para mostrar os resultados de forma padronizada
-def mostrar_resultados(matched_results, input_names):
-    if matched_results:
-        st.success(f"Encontrados {len(matched_results)} correspondências:")
+# Seção de entrada de dados
+st.subheader("Nomes para Comparação")
+candidates_input = st.text_area(
+    "Insira os nomes completos dos candidatos (separados por vírgula):",
+    placeholder="Ex: Maria Silva Oliveira, José Carlos Pereira",
+    height=100,
+    key="candidates_input"
+)
+
+precision = st.slider(
+    "Nível de precisão na comparação:",
+    min_value=50,
+    max_value=100,
+    value=90,
+    help="100% exige correspondência exata entre os nomes",
+    key="precision_slider"
+)
+st.write("Limiares mais elevados tornam a busca mais precisa. Limiares abaixo de 85% aumentam o risco de falsos positivos.")
+
+# Seleção de método de comparação
+metodo_comparacao = st.radio(
+    "Método de comparação:",
+    options=['Comparar ao PDF de um currículo Lattes', 'Comparar à lista de autores de uma publicação'],
+    index=0
+)
+
+uploaded_file = None
+doi_input = None
+
+if metodo_comparacao == 'Comparar ao PDF de um currículo Lattes':
+    with st.expander("Como baixar o arquivo PDF do Lattes"):
+        st.markdown("""
+        1. Acesse o currículo Lattes da pessoa no site do CNPq
+        2. Role a tela até o final do currículo
+        3. Clique no botão azul 'Imprimir Currículo'
+        4. Na tela de impressão, escolha 'Salvar como PDF'
+        5. Faça upload do PDF neste aplicativo
+        """)
         
-        # Criar tabela com os resultados
-        results_data = []
-        for match in matched_results:
-            results_data.append({
-                "Nome inserido": match["nome_inserido"],
-                "Nome encontrado": match["nome_encontrado"],
-                "Similaridade (%)": round(match["similaridade"], 1),
-                "Variação utilizada": match["variacao_usada"]
+    uploaded_file = st.file_uploader("Carregue o PDF para análise:", type="pdf", key="pdf_uploader")
+else:
+    doi_input = st.text_input("Insira o DOI da publicação (ex: 10.1234/abc.2021.11.002):", key="doi_input")
+
+# Controle do botão de busca
+buscar_nomes = False
+if ((metodo_comparacao == 'Comparar ao PDF de um currículo Lattes' and uploaded_file is not None) or
+    (metodo_comparacao == 'Comparar à lista de autores de uma publicação' and doi_input)):
+    
+    if candidates_input.strip():
+        buscar_nomes = st.button("Comparar Nomes", key="buscar_button")
+
+# Processamento principal
+if buscar_nomes:
+    try:
+        # Processar nomes dos candidatos
+        nomes_candidatos = [nome.strip() for nome in candidates_input.split(',') if nome.strip()]
+        candidatos = []
+        
+        for nome in nomes_candidatos:
+            processado = processar_nome(nome)
+            partes = processado.split()
+            combinacoes = gerar_combinacoes_nomes(partes)
+            candidatos.append({
+                'original': nome,
+                'combinations': combinacoes
             })
-        
-        # Ordenar os resultados por similaridade (do maior para o menor)
-        results_data.sort(key=lambda x: x["Similaridade (%)"], reverse=True)
-        
-        st.table(results_data)
-        
-        # Mostrar quais nomes não tiveram correspondência
-        matched_input_names = set(match["nome_inserido"] for match in matched_results)
-        unmatched_names = set(input_names) - matched_input_names
-        
-        if unmatched_names:
-            st.warning("Nomes sem correspondência:")
-            for name in unmatched_names:
-                st.write(f"- {name}")
-    else:
-        st.warning("Nenhuma correspondência encontrada.")
 
-if __name__ == "__main__":
-    main()
+        # Obter nomes para comparação
+        nomes_comparacao = []
+        
+        if metodo_comparacao == 'Comparar ao PDF de um currículo Lattes':
+            # Processar PDF
+            doc = fitz.open(stream=uploaded_file.getvalue(), filetype="pdf")
+            raw_text = "".join(page.get_text() + "\n" for page in doc)
+            cleaned_text = re.sub(r'\s+', ' ', raw_text)
+
+            texto_marcado = marcar_inicio_nome(cleaned_text)
+            texto_marcado = marcar_fim_nome_apos_inicio(texto_marcado)
+            texto_formatado = formatar_quebras_paragrafo(texto_marcado)
+            texto_limpo = limpar_texto(texto_formatado)
+            texto_normalizado = normalizar_nomes(texto_limpo)
+            texto_sem_particulas = remover_particulas(texto_normalizado)
+            texto_final = texto_sem_particulas
+
+            nomes_comparacao = [linha.strip() for linha in texto_final.split('\n') if linha.strip()]
+            
+        else:
+            # Processar DOI
+            autores, _ = get_authors_from_doi(doi_input.strip())
+            if not autores:
+                st.error("DOI inválido ou não encontrado. Verifique o número e tente novamente.")
+                st.stop()  # Corrigido
+                
+            texto_autores = '\n'.join(autores)
+            texto_normalizado = normalizar_nomes(texto_autores)
+            texto_sem_particulas = remover_particulas(texto_normalizado)
+            nomes_comparacao = [linha.strip() for linha in texto_sem_particulas.split('\n') if linha.strip()]
+
+        # Realizar comparações
+        threshold = precision / 100.0
+        resultados = []
+        
+        for candidato in candidatos:
+            encontrados = []
+            
+            for combinacao in candidato['combinations']:
+                for nome in nomes_comparacao:
+                    similaridade = SequenceMatcher(None, combinacao, nome).ratio()
+                    if similaridade >= threshold:
+                        encontrados.append(nome)
+            
+            # Remover duplicatas mantendo a ordem
+            vistos = set()
+            unicos = []
+            for nome in encontrados:
+                if nome not in vistos:
+                    vistos.add(nome)
+                    unicos.append(nome)
+            
+            if unicos:
+                resultados.append({
+                    'buscado': candidato['original'],
+                    'encontrados': unicos
+                })
+
+        # Exibir resultados
+        st.subheader("Resultados da Busca")
+        
+        if resultados:
+            for resultado in resultados:
+                st.write(f"**Nome buscado:** {resultado['buscado']}")
+                st.write("**Nome(s) encontrado(s):**")
+                for encontrado in resultado['encontrados']:
+                    st.write(encontrado)
+                st.write("---")
+        else:
+            st.write("**Nenhuma correspondência encontrada**")
+
+    except Exception as e:
+        st.error(f"Erro durante o processamento: {str(e)}")
+elif uploaded_file is not None and not candidates_input:
+    st.warning("Por favor, insira os nomes dos candidatos para comparação.")
