@@ -1,6 +1,4 @@
 streamlit
-lxml
-unidecode
-fuzzywuzzy
-python-Levenshtein
+pymupdf
 requests
+unidecode
