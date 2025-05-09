@@ -257,7 +257,7 @@ if metodo_comparacao == 'Comparar ao PDF de um currículo Lattes':
         
     uploaded_file = st.file_uploader("Carregue o PDF para análise:", type="pdf", key="pdf_uploader")
 else:
-    doi_input = st.text_input("Insira o DOI da publicação (ex: 10.1234/abc.2021.11.002):", placeholder="ex: 10.1234/abc.2021.11.002",
+    doi_input = st.text_input("Insira o DOI da publicação:", placeholder="ex: 10.1234/abc.2021.11.002",
                               key="doi_input")
 placeholder="Ex: Maria Silva Oliveira, José Carlos Pereira",
 # Controle do botão de busca
